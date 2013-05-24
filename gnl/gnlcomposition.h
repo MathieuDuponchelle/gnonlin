@@ -43,9 +43,8 @@ G_BEGIN_DECLS
 
 #define EOS_MUTEX_LOCK(comp) g_mutex_lock(comp->priv->eos_mutex)
 #define EOS_MUTEX_UNLOCK(comp) g_mutex_unlock(comp->priv->eos_mutex)
-
 #define WAIT_FOR_EOS(comp) g_cond_wait(&(comp->priv->eos_cond), &(comp->priv->eos_mutex))
-#define BROADCAST_EOS(comp) g_cond_signal(&(comp->priv->eos_cond))
+#define SIGNAL_EOS(comp) g_cond_signal(&(comp->priv->eos_cond))
 
 typedef struct _GnlCompositionPrivate GnlCompositionPrivate;
 
