@@ -150,7 +150,7 @@ struct _GnlCompositionPrivate
   GCond eos_cond;
   GMutex eos_mutex;
 
-  gboolean send_eos;
+  gboolean running;
 };
 
 static GParamSpec *gnlobject_properties[GNLOBJECT_PROP_LAST];
@@ -626,7 +626,6 @@ gnl_composition_reset (GnlComposition * comp)
 
   priv->update_required = FALSE;
   priv->send_stream_start = TRUE;
-  priv->send_eos = TRUE;
 
   GST_DEBUG_OBJECT (comp, "Composition now resetted");
 }
@@ -695,9 +694,6 @@ ghost_event_probe_handler (GstPad * ghostpad G_GNUC_UNUSED,
     {
       gboolean reverse = (comp->priv->segment->rate < 0);
 
-      if (comp->priv->send_eos == FALSE)
-        return GST_PAD_PROBE_DROP;
-
       COMP_FLUSHING_LOCK (comp);
       if (priv->flushing) {
         GST_DEBUG_OBJECT (comp, "flushing, bailing out");
@@ -726,9 +722,8 @@ ghost_event_probe_handler (GstPad * ghostpad G_GNUC_UNUSED,
         COMP_OBJECTS_UNLOCK (comp);
       }
 
-      if (retval == GST_PAD_PROBE_OK && comp->priv->send_eos) {
+      if (retval == GST_PAD_PROBE_OK) {
         GST_ERROR_OBJECT (comp, "Got EOS for real, fowarding it");
-        comp->priv->send_eos = FALSE;
         seek_handling (comp, TRUE, TRUE);
 
         return GST_PAD_PROBE_OK;
@@ -1713,18 +1708,13 @@ set_child_caps (GValue * item, GValue * ret G_GNUC_UNUSED, GnlObject * comp)
 static gpointer
 eos_thread_function (GnlComposition * comp)
 {
-  gboolean carry_on = TRUE;
-
-  while (carry_on) {
+  while (comp->priv->running) {
     GnlCompositionPrivate *priv;
     gboolean reverse;
-    WAIT_FOR_EOS (comp);
-    if (!comp->priv->send_eos) {
-      GST_ERROR ("I'm dying now bitch");
-      return (NULL);
-    }
-    /* Set up a non-initial seek on segment_stop */
 
+    WAIT_FOR_EOS (comp);
+
+    /* Set up a non-initial seek on segment_stop */
     priv = comp->priv;
     reverse = (priv->segment->rate < 0.0);
     if (!reverse) {
@@ -1747,11 +1737,7 @@ eos_thread_function (GnlComposition * comp)
 
       if (!(priv->segment->flags & GST_SEEK_FLAG_SEGMENT)
           && priv->ghostpad) {
-        //      GST_ERROR_OBJECT (comp,
-        //                "Pushing out EOS in eos_main_thread, should not happen");
-        //gst_pad_push_event (priv->ghostpad, gst_event_new_eos ());
-        GST_ERROR ("I'm exiting");
-        g_thread_exit (NULL);
+        GST_DEBUG_OBJECT (comp, "Real EOS should be sent now");
       } else if (priv->segment->flags & GST_SEEK_FLAG_SEGMENT) {
         gint64 epos;
 
@@ -1787,13 +1773,13 @@ gnl_composition_change_state (GstElement * element, GstStateChange transition)
 
   switch (transition) {
     case GST_STATE_CHANGE_NULL_TO_READY:
+      comp->priv->running = TRUE;
+      comp->priv->eos_thread =
+          g_thread_new ("eos_thread", (GThreadFunc) eos_thread_function, comp);
       break;
     case GST_STATE_CHANGE_READY_TO_PAUSED:
     {
       GstIterator *childs;
-
-      comp->priv->eos_thread =
-          g_thread_new ("eos_thread", (GThreadFunc) eos_thread_function, comp);
 
       gnl_composition_reset (comp);
 
@@ -1835,13 +1821,13 @@ gnl_composition_change_state (GstElement * element, GstStateChange transition)
     }
       break;
     case GST_STATE_CHANGE_PAUSED_TO_READY:
-      comp->priv->send_eos = FALSE;
-      SIGNAL_EOS (comp);
-      g_thread_join (comp->priv->eos_thread);
       gnl_composition_reset (comp);
       break;
     case GST_STATE_CHANGE_READY_TO_NULL:
       gnl_composition_reset (comp);
+      comp->priv->running = FALSE;
+      SIGNAL_EOS (comp);
+      g_thread_join (comp->priv->eos_thread);
       break;
     default:
       break;
