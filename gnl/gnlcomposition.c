@@ -1719,6 +1719,10 @@ eos_thread_function (GnlComposition * comp)
     GnlCompositionPrivate *priv;
     gboolean reverse;
     WAIT_FOR_EOS (comp);
+    if (!comp->priv->send_eos) {
+      GST_ERROR ("I'm dying now bitch");
+      return (NULL);
+    }
     /* Set up a non-initial seek on segment_stop */
 
     priv = comp->priv;
@@ -1746,6 +1750,7 @@ eos_thread_function (GnlComposition * comp)
         //      GST_ERROR_OBJECT (comp,
         //                "Pushing out EOS in eos_main_thread, should not happen");
         //gst_pad_push_event (priv->ghostpad, gst_event_new_eos ());
+        GST_ERROR ("I'm exiting");
         g_thread_exit (NULL);
       } else if (priv->segment->flags & GST_SEEK_FLAG_SEGMENT) {
         gint64 epos;
@@ -1781,6 +1786,8 @@ gnl_composition_change_state (GstElement * element, GstStateChange transition)
       gst_element_state_get_name (GST_STATE_TRANSITION_NEXT (transition)));
 
   switch (transition) {
+    case GST_STATE_CHANGE_NULL_TO_READY:
+      break;
     case GST_STATE_CHANGE_READY_TO_PAUSED:
     {
       GstIterator *childs;
@@ -1828,6 +1835,9 @@ gnl_composition_change_state (GstElement * element, GstStateChange transition)
     }
       break;
     case GST_STATE_CHANGE_PAUSED_TO_READY:
+      comp->priv->send_eos = FALSE;
+      SIGNAL_EOS (comp);
+      g_thread_join (comp->priv->eos_thread);
       gnl_composition_reset (comp);
       break;
     case GST_STATE_CHANGE_READY_TO_NULL:
