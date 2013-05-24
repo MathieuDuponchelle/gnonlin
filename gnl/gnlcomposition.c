@@ -145,6 +145,12 @@ struct _GnlCompositionPrivate
    */
   GstPadEventFunction gnl_event_pad_func;
   gboolean send_stream_start;
+
+  GThread *eos_thread;
+  GCond eos_cond;
+  GMutex eos_mutex;
+
+  gboolean send_eos;
 };
 
 static GParamSpec *gnlobject_properties[GNLOBJECT_PROP_LAST];
@@ -620,6 +626,7 @@ gnl_composition_reset (GnlComposition * comp)
 
   priv->update_required = FALSE;
   priv->send_stream_start = TRUE;
+  priv->send_eos = TRUE;
 
   GST_DEBUG_OBJECT (comp, "Composition now resetted");
 }
@@ -740,6 +747,9 @@ ghost_event_probe_handler (GstPad * ghostpad G_GNUC_UNUSED,
       gboolean reverse = (comp->priv->segment->rate < 0);
       gboolean should_check_objects = FALSE;
 
+      if (comp->priv->send_eos == FALSE)
+        return GST_PAD_PROBE_DROP;
+
       COMP_FLUSHING_LOCK (comp);
       if (priv->flushing) {
         GST_DEBUG_OBJECT (comp, "flushing, bailing out");
@@ -749,12 +759,12 @@ ghost_event_probe_handler (GstPad * ghostpad G_GNUC_UNUSED,
       }
       COMP_FLUSHING_UNLOCK (comp);
 
-      GST_DEBUG_OBJECT (comp, "Adding eos handling to main thread");
-      if (priv->pending_idle) {
-        GST_WARNING_OBJECT (comp,
-            "There was already a pending eos in main thread !");
-        g_source_remove (priv->pending_idle);
-      }
+      /* GST_DEBUG_OBJECT (comp, "Adding eos handling to main thread"); */
+      /* if (priv->pending_idle) { */
+      /*   GST_WARNING_OBJECT (comp, */
+      /*       "There was already a pending eos in main thread !"); */
+      /*   g_source_remove (priv->pending_idle); */
+      /* } */
 
       if (reverse && GST_CLOCK_TIME_IS_VALID (comp->priv->segment_start))
         should_check_objects = TRUE;
@@ -775,15 +785,21 @@ ghost_event_probe_handler (GstPad * ghostpad G_GNUC_UNUSED,
             /* FIXME : This should be switched to using a g_thread_create() instead
              * of a g_idle_add(). EXTENSIVE TESTING AND ANALYSIS REQUIRED BEFORE
              * DOING THE SWITCH !!! */
-            priv->pending_idle =
-                g_idle_add ((GSourceFunc) eos_main_thread, (gpointer) comp);
             break;
           }
         }
       }
 
-      if (retval == GST_PAD_PROBE_OK)
-        GST_DEBUG_OBJECT (comp, "Got EOS for real, fowarding it");
+      (void) eos_main_thread;
+
+      BROADCAST_EOS (comp);
+
+      if (retval == GST_PAD_PROBE_OK && comp->priv->send_eos) {
+        GST_ERROR_OBJECT (comp, "Got EOS for real, fowarding it");
+        gst_pad_push_event (comp->priv->ghostpad, gst_event_new_eos ());
+        comp->priv->send_eos = FALSE;
+      }
+      retval = GST_PAD_PROBE_DROP;
     }
       break;
     default:
@@ -1757,6 +1773,65 @@ set_child_caps (GValue * item, GValue * ret G_GNUC_UNUSED, GnlObject * comp)
   return TRUE;
 }
 
+static gpointer
+eos_thread_function (GnlComposition * comp)
+{
+  gboolean carry_on = TRUE;
+
+  while (carry_on) {
+    GnlCompositionPrivate *priv;
+    gboolean reverse;
+    WAIT_FOR_EOS (comp);
+    /* Set up a non-initial seek on segment_stop */
+
+    priv = comp->priv;
+    reverse = (priv->segment->rate < 0.0);
+    if (!reverse) {
+      GST_DEBUG_OBJECT (comp,
+          "Setting segment->start to segment_stop:%" GST_TIME_FORMAT,
+          GST_TIME_ARGS (priv->segment_stop));
+      priv->segment->start = priv->segment_stop;
+    } else {
+      GST_DEBUG_OBJECT (comp,
+          "Setting segment->stop to segment_start:%" GST_TIME_FORMAT,
+          GST_TIME_ARGS (priv->segment_start));
+      priv->segment->stop = priv->segment_start;
+    }
+
+    seek_handling (comp, TRUE, TRUE);
+
+    if (!priv->current) {
+      /* If we're at the end, post SEGMENT_DONE, or push EOS */
+      GST_DEBUG_OBJECT (comp, "Nothing else to play");
+
+      if (!(priv->segment->flags & GST_SEEK_FLAG_SEGMENT)
+          && priv->ghostpad) {
+        //      GST_ERROR_OBJECT (comp,
+        //                "Pushing out EOS in eos_main_thread, should not happen");
+        //gst_pad_push_event (priv->ghostpad, gst_event_new_eos ());
+        g_thread_exit (NULL);
+      } else if (priv->segment->flags & GST_SEEK_FLAG_SEGMENT) {
+        gint64 epos;
+
+        if (GST_CLOCK_TIME_IS_VALID (priv->segment->stop))
+          epos = (MIN (priv->segment->stop, GNL_OBJECT_STOP (comp)));
+        else
+          epos = GNL_OBJECT_STOP (comp);
+
+        GST_LOG_OBJECT (comp, "Emitting segment done pos %" GST_TIME_FORMAT,
+            GST_TIME_ARGS (epos));
+        gst_element_post_message (GST_ELEMENT_CAST (comp),
+            gst_message_new_segment_done (GST_OBJECT (comp),
+                priv->segment->format, epos));
+        gst_pad_push_event (priv->ghostpad,
+            gst_event_new_segment_done (priv->segment->format, epos));
+      }
+    }
+
+  }
+
+  return NULL;
+}
 
 static GstStateChangeReturn
 gnl_composition_change_state (GstElement * element, GstStateChange transition)
@@ -1772,6 +1847,9 @@ gnl_composition_change_state (GstElement * element, GstStateChange transition)
     case GST_STATE_CHANGE_READY_TO_PAUSED:
     {
       GstIterator *childs;
+
+      comp->priv->eos_thread =
+          g_thread_new ("eos_thread", (GThreadFunc) eos_thread_function, comp);
 
       gnl_composition_reset (comp);
 
@@ -1813,6 +1891,8 @@ gnl_composition_change_state (GstElement * element, GstStateChange transition)
     }
       break;
     case GST_STATE_CHANGE_PAUSED_TO_READY:
+      gnl_composition_reset (comp);
+      break;
     case GST_STATE_CHANGE_READY_TO_NULL:
       gnl_composition_reset (comp);
       break;
