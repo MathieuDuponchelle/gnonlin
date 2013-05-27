@@ -186,6 +186,23 @@ test_time_duration_full (gboolean async)
   gst_object_unref (comp);
 }
 
+static gint64 last_position;
+
+static gboolean
+check_position_progression (GstPipeline * pipeline)
+{
+  gint64 position;
+  gint64 diff;
+
+  gst_element_query_position (GST_ELEMENT (pipeline), GST_FORMAT_TIME,
+      &position);
+  diff = position - last_position;
+  last_position = position;
+  g_print ("diff now : %" GST_TIME_FORMAT "\n", GST_TIME_ARGS (diff));
+  fail_unless (diff > 0.04 * GST_SECOND && diff < 0.06 * GST_SECOND);
+  return TRUE;
+}
+
 static void
 test_one_after_other_full (gboolean async)
 {
@@ -193,9 +210,8 @@ test_one_after_other_full (gboolean async)
   GstElement *comp, *sink, *source1, *source2;
   CollectStructure *collect;
   GstBus *bus;
-  GstMessage *message;
-  gboolean carry_on = TRUE;
   GstPad *sinkpad;
+  guint source_id;
 
   pipeline = gst_pipeline_new ("test_pipeline");
   comp =
@@ -279,19 +295,8 @@ test_one_after_other_full (gboolean async)
   collect->comp = comp;
   collect->sink = sink;
 
-  /* Expected segments */
-  collect->expected_segments = g_list_append (collect->expected_segments,
-      segment_new (1.0, GST_FORMAT_TIME, 5 * GST_SECOND, 6 * GST_SECOND, 0));
-  collect->expected_segments = g_list_append (collect->expected_segments,
-      segment_new (1.0, GST_FORMAT_TIME,
-          2 * GST_SECOND, 3 * GST_SECOND, 1 * GST_SECOND));
-
   g_signal_connect (G_OBJECT (comp), "pad-added",
       G_CALLBACK (composition_pad_added_cb), collect);
-
-  sinkpad = gst_element_get_static_pad (sink, "sink");
-  gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_DATA_DOWNSTREAM,
-      (GstPadProbeCallback) sinkpad_probe, collect, NULL);
 
   bus = gst_element_get_bus (GST_ELEMENT (pipeline));
 
@@ -299,33 +304,30 @@ test_one_after_other_full (gboolean async)
   ASSERT_OBJECT_REFCOUNT (source1, "source1", 1);
 
   fail_if (gst_element_set_state (GST_ELEMENT (pipeline),
+          GST_STATE_PAUSED) == GST_STATE_CHANGE_FAILURE);
+
+  {
+    GstState state;
+    GstState pending;
+    gst_element_get_state (GST_ELEMENT (pipeline), &state, &pending,
+        GST_CLOCK_TIME_NONE);
+  }
+
+  gst_element_seek_simple (GST_ELEMENT (pipeline), GST_FORMAT_TIME,
+      GST_SEEK_FLAG_FLUSH, 0);
+
+  fail_if (gst_element_set_state (GST_ELEMENT (pipeline),
           GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE);
 
   GST_DEBUG ("Let's poll the bus");
+  g_object_set (sink, "sync", TRUE, NULL);
+  last_position = 0;
+  source_id =
+      g_timeout_add (50, (GSourceFunc) check_position_progression, pipeline);
+  poll_the_bus (bus);
+  g_source_remove (source_id);
 
-  while (carry_on) {
-    message = gst_bus_poll (bus, GST_MESSAGE_ANY, GST_SECOND / 10);
-    if (message) {
-      switch (GST_MESSAGE_TYPE (message)) {
-        case GST_MESSAGE_EOS:
-          /* we should check if we really finished here */
-          GST_WARNING ("Got an EOS");
-          carry_on = FALSE;
-          break;
-        case GST_MESSAGE_SEGMENT_START:
-        case GST_MESSAGE_SEGMENT_DONE:
-          /* We shouldn't see any segement messages, since we didn't do a segment seek */
-          GST_WARNING ("Saw a Segment start/stop");
-          fail_if (TRUE);
-          break;
-        case GST_MESSAGE_ERROR:
-          fail_error_message (message);
-        default:
-          break;
-      }
-      gst_mini_object_unref (GST_MINI_OBJECT (message));
-    }
-  }
+  g_object_set (sink, "sync", FALSE, NULL);
 
   GST_DEBUG ("Setting pipeline to NULL");
 
@@ -345,40 +347,18 @@ test_one_after_other_full (gboolean async)
   collect->gotsegment = FALSE;
   collect->expected_base = 0;
 
+  sinkpad = gst_element_get_static_pad (sink, "sink");
+  gst_pad_add_probe (sinkpad, GST_PAD_PROBE_TYPE_DATA_DOWNSTREAM,
+      (GstPadProbeCallback) sinkpad_probe, collect, NULL);
 
   GST_DEBUG ("Setting pipeline to PLAYING again");
 
   fail_if (gst_element_set_state (GST_ELEMENT (pipeline),
           GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE);
 
-  carry_on = TRUE;
-
   GST_DEBUG ("Let's poll the bus AGAIN");
 
-  while (carry_on) {
-    message = gst_bus_poll (bus, GST_MESSAGE_ANY, GST_SECOND / 10);
-    if (message) {
-      switch (GST_MESSAGE_TYPE (message)) {
-        case GST_MESSAGE_EOS:
-          /* we should check if we really finished here */
-          carry_on = FALSE;
-          break;
-        case GST_MESSAGE_SEGMENT_START:
-        case GST_MESSAGE_SEGMENT_DONE:
-          /* We shouldn't see any segement messages, since we didn't do a segment seek */
-          GST_WARNING ("Saw a Segment start/stop");
-          fail_if (TRUE);
-          break;
-        case GST_MESSAGE_ERROR:
-          fail_error_message (message);
-        default:
-          break;
-      }
-      gst_mini_object_unref (GST_MINI_OBJECT (message));
-    } else {
-      GST_DEBUG ("bus_poll responded, but there wasn't any message...");
-    }
-  }
+  poll_the_bus (bus);
 
   fail_if (collect->expected_segments != NULL);
 
