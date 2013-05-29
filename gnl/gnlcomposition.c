@@ -146,6 +146,8 @@ struct _GnlCompositionPrivate
   GCond update_pipeline_cond;
   GMutex update_pipeline_mutex;
 
+  gboolean reset_time;
+
   gboolean running;
 };
 
@@ -377,6 +379,8 @@ gnl_composition_init (GnlComposition * comp)
   priv->outside_segment = gst_segment_new ();
 
   priv->waitingpads = 0;
+
+  priv->reset_time = FALSE;
 
   priv->objects_hash = g_hash_table_new_full
       (g_direct_hash,
@@ -632,6 +636,8 @@ gnl_composition_reset (GnlComposition * comp)
 
   COMP_FLUSHING_UNLOCK (comp);
 
+  priv->reset_time = FALSE;
+
   priv->update_required = FALSE;
   priv->send_stream_start = TRUE;
 
@@ -650,6 +656,13 @@ ghost_event_probe_handler (GstPad * ghostpad G_GNUC_UNUSED,
   GST_DEBUG_OBJECT (comp, "event: %s", GST_EVENT_TYPE_NAME (event));
 
   switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_FLUSH_STOP:
+      GST_DEBUG_OBJECT (comp,
+          "replacing flush stop event with a flush stop event with 'reset_time' = %d",
+          priv->reset_time);
+      GST_PAD_PROBE_INFO_DATA (info) =
+          gst_event_new_flush_stop (priv->reset_time);
+      break;
     case GST_EVENT_STREAM_START:
       if (g_atomic_int_compare_and_exchange (&priv->send_stream_start, TRUE,
               FALSE)) {
@@ -1062,6 +1075,7 @@ gnl_composition_event_handler (GstPad * ghostpad, GstObject * parent,
       COMP_OBJECTS_UNLOCK (comp);
       gst_event_unref (event);
       event = nevent;
+      priv->reset_time = TRUE;
       break;
     }
     case GST_EVENT_QOS:
@@ -1151,6 +1165,7 @@ gnl_composition_event_handler (GstPad * ghostpad, GstObject * parent,
     if (priv->waitingpads == 0) {
       GST_DEBUG_OBJECT (comp, "About to call gnl_event_pad_func()");
       res = priv->gnl_event_pad_func (priv->ghostpad, parent, event);
+      priv->reset_time = FALSE;
       GST_DEBUG_OBJECT (comp, "Done calling gnl_event_pad_func() %d", res);
     } else
       gst_event_unref (event);
@@ -1266,7 +1281,8 @@ gnl_composition_ghost_pad_set_target (GnlComposition * comp, GstPad * target,
 
   if (target && (priv->ghosteventprobe == 0)) {
     priv->ghosteventprobe =
-        gst_pad_add_probe (target, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+        gst_pad_add_probe (target,
+        GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM | GST_PAD_PROBE_TYPE_EVENT_FLUSH,
         (GstPadProbeCallback) ghost_event_probe_handler, comp, NULL);
     GST_DEBUG_OBJECT (comp, "added event probe %lu", priv->ghosteventprobe);
   }
