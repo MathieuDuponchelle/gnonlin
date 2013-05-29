@@ -650,6 +650,11 @@ ghost_event_probe_handler (GstPad * ghostpad G_GNUC_UNUSED,
   GST_DEBUG_OBJECT (comp, "event: %s", GST_EVENT_TYPE_NAME (event));
 
   switch (GST_EVENT_TYPE (event)) {
+    case GST_EVENT_FLUSH_STOP:
+      GST_DEBUG_OBJECT (comp,
+          "replacing flush stop event with a flush stop event with 'reset_time' = FALSE");
+      GST_PAD_PROBE_INFO_DATA (info) = gst_event_new_flush_stop (FALSE);
+      break;
     case GST_EVENT_STREAM_START:
       if (g_atomic_int_compare_and_exchange (&priv->send_stream_start, TRUE,
               FALSE)) {
@@ -1266,7 +1271,8 @@ gnl_composition_ghost_pad_set_target (GnlComposition * comp, GstPad * target,
 
   if (target && (priv->ghosteventprobe == 0)) {
     priv->ghosteventprobe =
-        gst_pad_add_probe (target, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+        gst_pad_add_probe (target,
+        GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM | GST_PAD_PROBE_TYPE_EVENT_FLUSH,
         (GstPadProbeCallback) ghost_event_probe_handler, comp, NULL);
     GST_DEBUG_OBJECT (comp, "added event probe %lu", priv->ghosteventprobe);
   }
