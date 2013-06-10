@@ -62,6 +62,8 @@ G_BEGIN_DECLS
   GstPad *ghostpad;		/* src ghostpad */
 
   GstElement *element;		/* controlled element */
+
+  GstClockTime next_base_time;
 };
 
 struct _GnlOperationClass

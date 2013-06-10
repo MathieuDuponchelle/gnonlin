@@ -184,6 +184,7 @@ gnl_operation_reset (GnlOperation * operation)
 {
   operation->num_sinks = 1;
   operation->realsinks = 0;
+  operation->next_base_time = 0;
 }
 
 static void
