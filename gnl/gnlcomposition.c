@@ -266,6 +266,7 @@ struct _GnlCompositionEntry
 
   /* handler id for block probe */
   gulong probeid;
+  gulong dataprobeid;
 };
 
 static void
@@ -1210,6 +1211,14 @@ pad_blocked (GstPad * pad, GstPadProbeInfo * info, GnlComposition * comp)
 {
   GST_DEBUG_OBJECT (comp, "Pad : %s:%s", GST_DEBUG_PAD_NAME (pad));
 
+  return GST_PAD_PROBE_OK;
+}
+
+static GstPadProbeReturn
+drop_data (GstPad * pad, GstPadProbeInfo * info, GnlComposition * comp)
+{
+  GST_DEBUG_OBJECT (comp, "Pad : %s:%s", GST_DEBUG_PAD_NAME (pad));
+
   /* When updating the pipeline, do not let data flowing */
   if (comp->priv->stackvalid == FALSE &&
       GST_IS_BUFFER (GST_PAD_PROBE_INFO_DATA (info)))
@@ -1294,6 +1303,12 @@ gnl_composition_ghost_pad_set_target (GnlComposition * comp, GstPad * target,
             gst_pad_add_probe (ptarget,
             GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM | GST_PAD_PROBE_TYPE_IDLE,
             (GstPadProbeCallback) pad_blocked, comp, NULL);
+      }
+
+      if (!priv->toplevelentry->dataprobeid) {
+        priv->toplevelentry->dataprobeid = gst_pad_add_probe (ptarget,
+            GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST,
+            (GstPadProbeCallback) drop_data, comp, NULL);
       }
 
       /* remove event probe */
@@ -2219,6 +2234,11 @@ compare_relink_single_node (GnlComposition * comp, GNode * node,
           GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM | GST_PAD_PROBE_TYPE_IDLE,
           (GstPadProbeCallback) pad_blocked, comp, NULL);
     }
+    if (!oldentry->dataprobeid) {
+      oldentry->dataprobeid = gst_pad_add_probe (srcpad,
+          GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST,
+          (GstPadProbeCallback) drop_data, comp, NULL);
+    }
   }
 
   entry = COMP_ENTRY (comp, newobj);
@@ -2370,6 +2390,11 @@ compare_deactivate_single_node (GnlComposition * comp, GNode * node,
           gst_pad_add_probe (srcpad,
           GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM | GST_PAD_PROBE_TYPE_IDLE,
           (GstPadProbeCallback) pad_blocked, comp, NULL);
+    }
+    if (entry && !entry->dataprobeid) {
+      entry->dataprobeid = gst_pad_add_probe (srcpad,
+          GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST,
+          (GstPadProbeCallback) drop_data, comp, NULL);
     }
 
     /* 2. If we have to modify or we have a parent, flush downstream
@@ -2674,8 +2699,6 @@ update_pipeline (GnlComposition * comp, GstClockTime currenttime,
   if (priv->current) {
     GstEvent *event;
 
-    priv->stackvalid = TRUE;
-
     /* 7.1. Create new seek event for newly configured timeline stack */
     if (samestack && (startchanged || stopchanged))
       event =
@@ -2734,6 +2757,7 @@ update_pipeline (GnlComposition * comp, GstClockTime currenttime,
       priv->childseek = event;
       ret = TRUE;
     }
+    priv->stackvalid = TRUE;
   } else {
     if ((!priv->objects_start) && priv->ghostpad) {
       GST_DEBUG_OBJECT (comp, "composition is now empty, removing ghostpad");
@@ -2770,6 +2794,10 @@ object_pad_removed (GnlObject * object, GstPad * pad, GnlComposition * comp)
         gst_pad_remove_probe (pad, entry->probeid);
         entry->probeid = 0;
       }
+      if (entry && entry->dataprobeid) {
+        gst_pad_remove_probe (pad, entry->dataprobeid);
+        entry->dataprobeid = 0;
+      }
     }
   }
 }
@@ -2792,6 +2820,12 @@ object_pad_added (GnlObject * object G_GNUC_UNUSED, GstPad * pad,
         gst_pad_add_probe (pad,
         GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM | GST_PAD_PROBE_TYPE_IDLE,
         (GstPadProbeCallback) pad_blocked, comp, NULL);
+  }
+
+  if (!entry->dataprobeid) {
+    entry->dataprobeid = gst_pad_add_probe (pad,
+        GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST,
+        (GstPadProbeCallback) drop_data, comp, NULL);
   }
 }
 
@@ -2957,9 +2991,15 @@ gnl_composition_remove_object (GstBin * bin, GstElement * element)
   GST_LOG_OBJECT (element, "Done removing from the composition, now updating");
   COMP_OBJECTS_UNLOCK (comp);
 
-  /* unblock source pad */
-  if (probeid && (srcpad = get_src_pad (element))) {
-    gst_pad_remove_probe (srcpad, probeid);
+  if ((srcpad = get_src_pad (element))) {
+    if (probeid) {
+      gst_pad_remove_probe (srcpad, probeid);
+      entry->probeid = 0;
+    }
+    if (entry->dataprobeid) {
+      gst_pad_remove_probe (srcpad, entry->dataprobeid);
+      entry->dataprobeid = 0;
+    }
     gst_object_unref (srcpad);
   }
 
