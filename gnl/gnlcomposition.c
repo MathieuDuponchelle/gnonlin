@@ -126,6 +126,7 @@ struct _GnlCompositionPrivate
   /* Seek segment handler */
   GstSegment *segment;
   GstSegment *outside_segment;
+  gboolean seeked_stack;
 
   /* Next running base_time to set on outgoing segment */
   guint64 next_base_time;
@@ -1085,6 +1086,7 @@ seek_handling (GnlComposition * comp, gboolean initial, gboolean update)
   COMP_FLUSHING_UNLOCK (comp);
 
   COMP_OBJECTS_LOCK (comp);
+  comp->priv->seeked_stack = FALSE;
   if (update || have_to_update_pipeline (comp)) {
     if (comp->priv->segment->rate >= 0.0)
       update_pipeline (comp, comp->priv->segment->start, initial, !update);
@@ -1244,7 +1246,7 @@ gnl_composition_event_handler (GstPad * ghostpad, GstObject * parent,
     /* If the timeline isn't entirely reconstructed, we silently ignore the
      * event. In the case of seeks the pipeline will already be correctly
      * configured at this point*/
-    if (priv->waitingpads == 0) {
+    if (priv->waitingpads == 0 && !priv->seeked_stack) {
       COMP_OBJECTS_UNLOCK (comp);
       GST_DEBUG_OBJECT (comp, "About to call gnl_event_pad_func()");
       res = priv->gnl_event_pad_func (priv->ghostpad, parent, event);
@@ -2192,11 +2194,16 @@ no_more_pads_object_cb (GstElement * element, GnlComposition * comp)
         "top-level pad %s:%s, Setting target of ghostpad to it",
         GST_DEBUG_PAD_NAME (tpad));
 
+
+    /* 1. set target of ghostpad to toplevel element src pad */
+    gnl_composition_ghost_pad_set_target (comp, tpad, topentry);
+
     /* 2. send pending seek */
     if (priv->childseek) {
       GstEvent *childseek = priv->childseek;
 
       priv->childseek = NULL;
+      priv->seeked_stack = TRUE;
       GST_INFO_OBJECT (comp, "Sending pending seek on %s:%s",
           GST_DEBUG_PAD_NAME (tpad));
 
@@ -2208,9 +2215,6 @@ no_more_pads_object_cb (GstElement * element, GnlComposition * comp)
       COMP_OBJECTS_LOCK (comp);
     }
     priv->childseek = NULL;
-
-    /* 1. set target of ghostpad to toplevel element src pad */
-    gnl_composition_ghost_pad_set_target (comp, tpad, topentry);
 
     /* Check again if the top-level element is still in the stack */
     if (priv->current &&
@@ -2797,14 +2801,14 @@ update_pipeline (GnlComposition * comp, GstClockTime currenttime,
             GST_DEBUG_PAD_NAME (pad));
 
         /* Send seek event */
-        GST_LOG_OBJECT (comp, "sending seek event");
-        if (gst_pad_send_event (pad, event)) {
-          /* Unconditionnaly set the ghostpad target to pad */
-          GST_LOG_OBJECT (comp,
-              "Setting the composition's ghostpad target to %s:%s",
-              GST_DEBUG_PAD_NAME (pad));
+        priv->seeked_stack = TRUE;
+        GST_LOG_OBJECT (comp,
+            "Setting the composition's ghostpad target to %s:%s",
+            GST_DEBUG_PAD_NAME (pad));
 
-          gnl_composition_ghost_pad_set_target (comp, pad, topentry);
+        /* Unconditionnaly set the ghostpad target to pad */
+        gnl_composition_ghost_pad_set_target (comp, pad, topentry);
+        if (gst_pad_send_event (pad, event)) {
 
           if (topentry->probeid) {
 
