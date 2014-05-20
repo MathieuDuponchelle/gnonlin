@@ -403,6 +403,113 @@ GST_START_TEST (test_no_more_pads_race)
 
 GST_END_TEST;
 
+static GstPadProbeReturn
+_count_seeks(GstPad *pad, GstPadProbeInfo *info, gint *seek_counter) {
+  GstEvent *event = GST_EVENT(info->data);
+
+  if (GST_EVENT_TYPE(event) == GST_EVENT_SEEK) {
+    *seek_counter += 1;
+  }
+
+  return GST_PAD_PROBE_OK;
+}
+
+GST_START_TEST (test_no_double_seek)
+{
+  GstBus *bus;
+  GstMessage *message;
+  GstElement *pipeline;
+  GstElement *gnl_mixer;
+  GstElement *composition;
+  GstElement *mixer, *fakesink;
+  GstElement *gnlsource, *gnlsource2;
+  GstElement *videotestsrc, *videotestsrc2;
+  gboolean ret;
+  GstPad *srcpad;
+  gint seek_counter = 0;
+  guint64 probe_id;
+
+  pipeline = GST_ELEMENT (gst_pipeline_new (NULL));
+  bus = gst_pipeline_get_bus (GST_PIPELINE (pipeline));
+
+  composition = gst_element_factory_make ("gnlcomposition", "composition");
+  fakesink = gst_element_factory_make ("fakesink", NULL);
+  g_object_set (fakesink, "sync", TRUE, NULL);
+
+  gnl_mixer = gst_element_factory_make ("gnloperation", "gnl_mixer");
+  mixer = gst_element_factory_make ("videomixer", "mixer");
+  fail_unless (mixer != NULL);
+  srcpad = gst_element_get_static_pad(mixer, "src");
+  probe_id = gst_pad_add_probe(srcpad, GST_PAD_PROBE_TYPE_EVENT_UPSTREAM,
+      (GstPadProbeCallback) _count_seeks, &seek_counter, NULL);
+  gst_bin_add (GST_BIN (gnl_mixer), mixer);
+  g_object_set (gnl_mixer, "start", (guint64) 0 * GST_SECOND,
+      "duration", 6 * GST_SECOND, "inpoint", (guint64) 0 * GST_SECOND,
+      "priority", 0, NULL);
+  gst_bin_add (GST_BIN (composition), gnl_mixer);
+
+  gnlsource = gst_element_factory_make ("gnlsource", "gnlsource1");
+  videotestsrc = gst_element_factory_make ("videotestsrc", "videotestsrc1");
+  gst_bin_add (GST_BIN (gnlsource), videotestsrc);
+  g_object_set (gnlsource, "start", (guint64) 0 * GST_SECOND,
+      "duration", 5 * GST_SECOND, "inpoint", (guint64) 0, "priority", 1, NULL);
+  fail_unless (gst_bin_add (GST_BIN (composition), gnlsource));
+
+  gnlsource2 = gst_element_factory_make ("gnlsource", "gnlsource2");
+  videotestsrc2 = gst_element_factory_make ("videotestsrc", "videotestsrc2");
+  gst_bin_add (GST_BIN (gnlsource2), videotestsrc2);
+  g_object_set (gnlsource2, "start", (guint64) 1 * GST_SECOND,
+      "duration", 5 * GST_SECOND, "inpoint", (guint64) 0, "priority", 2, NULL);
+  fail_unless (gst_bin_add (GST_BIN (composition), gnlsource2));
+
+  /* Connecting signals */
+  g_object_connect (composition, "signal::pad-added",
+      on_composition_pad_added_cb, fakesink, NULL);
+  g_object_connect (composition, "signal::pad-removed",
+      on_composition_pad_removed_cb, NULL, NULL);
+
+  GST_DEBUG ("Adding composition to pipeline");
+
+  gst_bin_add_many (GST_BIN (pipeline), composition, fakesink, NULL);
+
+  GST_DEBUG ("Setting pipeline to PAUSED");
+
+  g_signal_emit_by_name (composition, "commit", TRUE, &ret);
+  fail_if (gst_element_set_state (GST_ELEMENT (pipeline), GST_STATE_PAUSED)
+      == GST_STATE_CHANGE_FAILURE);
+
+  message = gst_bus_timed_pop_filtered (bus, GST_CLOCK_TIME_NONE,
+      GST_MESSAGE_ASYNC_DONE | GST_MESSAGE_ERROR);
+
+  if (GST_MESSAGE_TYPE (message) == GST_MESSAGE_ERROR)
+    fail_error_message (message);
+
+  gst_element_seek_simple(pipeline, GST_FORMAT_TIME, GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE, 2 * GST_SECOND);
+
+  message = gst_bus_timed_pop_filtered (bus, GST_CLOCK_TIME_NONE,
+      GST_MESSAGE_ASYNC_DONE | GST_MESSAGE_ERROR);
+
+  if (GST_MESSAGE_TYPE (message) == GST_MESSAGE_ERROR)
+    fail_error_message (message);
+
+  gst_element_seek_simple(pipeline, GST_FORMAT_TIME, GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_ACCURATE, 1.1 * GST_SECOND);
+
+  message = gst_bus_timed_pop_filtered (bus, GST_CLOCK_TIME_NONE,
+      GST_MESSAGE_ASYNC_DONE | GST_MESSAGE_ERROR);
+
+  if (GST_MESSAGE_TYPE (message) == GST_MESSAGE_ERROR)
+    fail_error_message (message);
+
+  fail_unless_equals_int(seek_counter, 3);
+
+  gst_pad_remove_probe(srcpad, probe_id);
+  gst_element_set_state (GST_ELEMENT (pipeline), GST_STATE_NULL);
+  gst_object_unref (pipeline);
+  gst_object_unref (bus);
+}
+
+GST_END_TEST;
+
 GST_START_TEST (test_simple_adder)
 {
   GstBus *bus;
@@ -538,6 +645,7 @@ gnonlin_suite (void)
   g_mutex_init (&pad_added_lock);
   tcase_add_test (tc_chain, test_change_object_start_stop_in_current_stack);
   tcase_add_test (tc_chain, test_remove_invalid_object);
+  tcase_add_test (tc_chain, test_no_double_seek);
   if (gst_registry_check_feature_version (gst_registry_get (), "videomixer", 0,
           11, 0)) {
     tcase_add_test (tc_chain, test_no_more_pads_race);
