@@ -1960,6 +1960,7 @@ gnl_composition_change_state (GstElement * element, GstStateChange transition)
     }
       break;
     case GST_STATE_CHANGE_PAUSED_TO_READY:
+      COMP_OBJECTS_LOCK (comp);
       gnl_composition_reset (comp);
       break;
     case GST_STATE_CHANGE_READY_TO_NULL:
@@ -1979,6 +1980,9 @@ gnl_composition_change_state (GstElement * element, GstStateChange transition)
 
   switch (transition) {
     case GST_STATE_CHANGE_PAUSED_TO_READY:
+      unblock_children (comp);
+      COMP_OBJECTS_UNLOCK (comp);
+      break;
     case GST_STATE_CHANGE_READY_TO_NULL:
       unblock_children (comp);
       break;
