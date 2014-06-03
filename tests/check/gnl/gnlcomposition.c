@@ -414,6 +414,7 @@ _count_seeks(GstPad *pad, GstPadProbeInfo *info, gint *seek_counter) {
   return GST_PAD_PROBE_OK;
 }
 
+/* This test ensures we don't seek our stack twice when user triggers a seek */
 GST_START_TEST (test_no_double_seek)
 {
   GstBus *bus;
