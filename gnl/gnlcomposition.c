@@ -134,6 +134,8 @@ struct _GnlCompositionPrivate
   /* number of pads we are waiting to appear so be can do proper linking */
   guint waitingpads;
 
+  guint32 current_seek_seqnum;
+
   /*
      OUR sync_handler on the child_bus
      We are called before gnl_object_sync_handler
@@ -185,13 +187,13 @@ static GstPadProbeReturn pad_blocked (GstPad * pad, GstPadProbeInfo * info,
 static inline void gnl_composition_remove_ghostpad (GnlComposition * comp);
 
 static gboolean
-seek_handling (GnlComposition * comp, gboolean initial, gboolean update);
+seek_handling (GnlComposition * comp, gboolean initial, gboolean update, gboolean forward_flushes);
 static gint objects_start_compare (GnlObject * a, GnlObject * b);
 static gint objects_stop_compare (GnlObject * a, GnlObject * b);
 static GstClockTime get_current_position (GnlComposition * comp);
 
 static gboolean update_pipeline (GnlComposition * comp,
-    GstClockTime currenttime, gboolean initial, gboolean modify);
+    GstClockTime currenttime, gboolean initial, gboolean modify, gboolean forward_flushes);
 static void no_more_pads_object_cb (GstElement * element,
     GnlComposition * comp);
 static gboolean gnl_composition_commit_func (GnlObject * object,
@@ -412,6 +414,7 @@ gnl_composition_init (GnlComposition * comp)
   priv->outside_segment = gst_segment_new ();
 
   priv->waitingpads = 0;
+  priv->current_seek_seqnum = 0;
 
   priv->reset_time = FALSE;
 
@@ -684,16 +687,27 @@ ghost_event_probe_handler (GstPad * ghostpad G_GNUC_UNUSED,
   GstEvent *event = GST_PAD_PROBE_INFO_EVENT (info);
   GList *tmp;
 
-  GST_DEBUG_OBJECT (comp, "event: %s", GST_EVENT_TYPE_NAME (event));
+  GST_ERROR_OBJECT (comp, "event: %s %d", GST_EVENT_TYPE_NAME (event), gst_event_get_seqnum(event));
 
   switch (GST_EVENT_TYPE (event)) {
     case GST_EVENT_FLUSH_STOP:
-      GST_DEBUG_OBJECT (comp,
+      if (gst_event_get_seqnum(event) != priv->current_seek_seqnum) {
+        GST_ERROR ("dropping a flush stop, current seqnum is %d", priv->current_seek_seqnum);
+        return GST_PAD_PROBE_DROP;
+      }
+      GST_ERROR_OBJECT (comp,
           "replacing flush stop event with a flush stop event with 'reset_time' = %d",
           priv->reset_time);
       GST_PAD_PROBE_INFO_DATA (info) =
           gst_event_new_flush_stop (priv->reset_time);
       gst_event_unref (event);
+      break;
+    case GST_EVENT_FLUSH_START:
+      if (gst_event_get_seqnum(event) != priv->current_seek_seqnum) {
+        GST_ERROR ("dropping a flush start, current seqnum is %d", priv->current_seek_seqnum);
+        return GST_PAD_PROBE_DROP;
+      }
+      GST_ERROR("forwarding a flush start");
       break;
     case GST_EVENT_STREAM_START:
       if (g_atomic_int_compare_and_exchange (&priv->send_stream_start, TRUE,
@@ -782,6 +796,7 @@ ghost_event_probe_handler (GstPad * ghostpad G_GNUC_UNUSED,
         return GST_PAD_PROBE_OK;
       }
 
+      GST_ERROR("got eos, updating pipeline");
       SIGNAL_UPDATE_PIPELINE (comp);
 
       retval = GST_PAD_PROBE_DROP;
@@ -890,7 +905,7 @@ update_pipeline_at_current_position (GnlComposition * comp)
 
   update_start_stop_duration (comp);
 
-  return update_pipeline (comp, curpos, TRUE, TRUE);
+  return update_pipeline (comp, curpos, TRUE, TRUE, TRUE);
 }
 
 static gboolean
@@ -1076,7 +1091,7 @@ update_operations_base_time (GnlComposition * comp, gboolean reverse)
 */
 
 static gboolean
-seek_handling (GnlComposition * comp, gboolean initial, gboolean update)
+seek_handling (GnlComposition * comp, gboolean initial, gboolean update, gboolean forward_flushes)
 {
   GST_DEBUG_OBJECT (comp, "initial:%d, update:%d", initial, update);
 
@@ -1089,9 +1104,9 @@ seek_handling (GnlComposition * comp, gboolean initial, gboolean update)
   comp->priv->seeked_stack = FALSE;
   if (update || have_to_update_pipeline (comp)) {
     if (comp->priv->segment->rate >= 0.0)
-      update_pipeline (comp, comp->priv->segment->start, initial, !update);
+      update_pipeline (comp, comp->priv->segment->start, initial, !update, forward_flushes);
     else
-      update_pipeline (comp, comp->priv->segment->stop, initial, !update);
+      update_pipeline (comp, comp->priv->segment->stop, initial, !update, forward_flushes);
   } else {
     update_operations_base_time (comp, !(comp->priv->segment->rate >= 0.0));
   }
@@ -1132,7 +1147,7 @@ handle_seek_event (GnlComposition * comp, GstEvent * event)
 
   comp->priv->next_base_time = 0;
 
-  seek_handling (comp, TRUE, FALSE);
+  seek_handling (comp, TRUE, FALSE, TRUE);
 }
 
 static gboolean
@@ -1150,6 +1165,7 @@ gnl_composition_event_handler (GstPad * ghostpad, GstObject * parent,
     {
       GstEvent *nevent;
 
+      GST_ERROR("composition got seeked");
       handle_seek_event (comp, event);
 
       /* the incoming event might not be quite correct, we get a new proper
@@ -1248,7 +1264,9 @@ gnl_composition_event_handler (GstPad * ghostpad, GstObject * parent,
      * configured at this point*/
     if (priv->waitingpads == 0 && !priv->seeked_stack) {
       COMP_OBJECTS_UNLOCK (comp);
-      GST_DEBUG_OBJECT (comp, "About to call gnl_event_pad_func()");
+      if (GST_EVENT_TYPE(event) == GST_EVENT_SEEK)
+        priv->current_seek_seqnum = gst_event_get_seqnum(event);
+
       res = priv->gnl_event_pad_func (priv->ghostpad, parent, event);
       priv->reset_time = FALSE;
       GST_DEBUG_OBJECT (comp, "Done calling gnl_event_pad_func() %d", res);
@@ -1862,7 +1880,7 @@ update_pipeline_func (GnlComposition * comp)
       priv->segment->stop = priv->segment_start;
     }
 
-    seek_handling (comp, TRUE, TRUE);
+    seek_handling (comp, TRUE, TRUE, FALSE);
 
     if (!priv->current) {
       /* If we're at the end, post SEGMENT_DONE, or push EOS */
@@ -1950,7 +1968,7 @@ gnl_composition_change_state (GstElement * element, GstStateChange transition)
 
       /* set ghostpad target */
       COMP_OBJECTS_LOCK (comp);
-      if (!(update_pipeline (comp, COMP_REAL_START (comp), TRUE, TRUE))) {
+      if (!(update_pipeline (comp, COMP_REAL_START (comp), TRUE, TRUE, TRUE))) {
         ret = GST_STATE_CHANGE_FAILURE;
         COMP_OBJECTS_UNLOCK (comp);
         goto beach;
@@ -2208,8 +2226,8 @@ no_more_pads_object_cb (GstElement * element, GnlComposition * comp)
 
       priv->childseek = NULL;
       priv->seeked_stack = TRUE;
-      GST_INFO_OBJECT (comp, "Sending pending seek on %s:%s",
-          GST_DEBUG_PAD_NAME (tpad));
+      GST_ERROR_OBJECT (comp, "Sending pending seek on %s:%s seqnum is %d",
+          GST_DEBUG_PAD_NAME (tpad), gst_event_get_seqnum(childseek));
 
       COMP_OBJECTS_UNLOCK (comp);
 
@@ -2482,7 +2500,7 @@ compare_deactivate_single_node (GnlComposition * comp, GNode * node,
      *   This ensures the streaming thread going through the current object has
      *   either stopped or is blocking against the source pad. */
     if ((modify || oldparent) && (peerpad = gst_pad_get_peer (srcpad))) {
-      GST_LOG_OBJECT (comp, "Sending flush start/stop downstream ");
+      GST_ERROR_OBJECT (srcpad, "Sending flush start/stop downstream ");
       gst_pad_send_event (peerpad, gst_event_new_flush_start ());
       gst_pad_send_event (peerpad, gst_event_new_flush_stop (TRUE));
       GST_DEBUG_OBJECT (comp, "DONE Sending flush events downstream");
@@ -2664,7 +2682,7 @@ beach:
  */
 static gboolean
 update_pipeline (GnlComposition * comp, GstClockTime currenttime,
-    gboolean initial, gboolean modify)
+    gboolean initial, gboolean modify, gboolean forward_flushes)
 {
   gboolean startchanged, stopchanged;
 
@@ -2791,6 +2809,14 @@ update_pipeline (GnlComposition * comp, GstClockTime currenttime,
     else
       event = get_new_seek_event (comp, initial, FALSE);
 
+    if (forward_flushes)
+      {
+        GST_ERROR("I shall forward events with seqnum %d", gst_event_get_seqnum (event));
+        priv->current_seek_seqnum = gst_event_get_seqnum (event);
+      } else {
+        GST_ERROR("I shall NOT :forward events with seqnum %d", gst_event_get_seqnum (event));
+      }
+
     /* 7.2.a If the stack entirely ready, send seek out synchronously */
     if (priv->waitingpads == 0) {
       GstPad *pad;
@@ -2812,6 +2838,7 @@ update_pipeline (GnlComposition * comp, GstClockTime currenttime,
 
         /* Unconditionnaly set the ghostpad target to pad */
         gnl_composition_ghost_pad_set_target (comp, pad, topentry);
+        GST_ERROR("sending seek event, seqnum is %d", gst_event_get_seqnum(event));
         if (gst_pad_send_event (pad, event)) {
 
           if (topentry->probeid) {
