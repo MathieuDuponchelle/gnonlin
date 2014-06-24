@@ -34,7 +34,7 @@
 static GstStaticPadTemplate gnl_composition_src_template =
 GST_STATIC_PAD_TEMPLATE ("src",
     GST_PAD_SRC,
-    GST_PAD_SOMETIMES,
+    GST_PAD_ALWAYS,
     GST_STATIC_CAPS_ANY);
 
 GST_DEBUG_CATEGORY_STATIC (gnlcomposition_debug);
@@ -1339,7 +1339,10 @@ gnl_composition_ghost_pad_set_target (GnlComposition * comp, GstPad * target,
   if (!hadghost) {
     /* Create new ghostpad */
     GstPad *ghostpad =
-        gnl_object_ghost_pad_no_target ((GnlObject *) comp, "src", GST_PAD_SRC, NULL);
+        gnl_object_ghost_pad_no_target ((GnlObject *) comp, "src",
+        GST_PAD_SRC,
+        gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS (comp),
+            "src"));
 
     if (!priv->gnl_event_pad_func) {
       GST_DEBUG_OBJECT (ghostpad, "About to replace event_pad_func");

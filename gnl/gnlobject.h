@@ -84,6 +84,8 @@ struct _GnlObject
 {
   GstBin parent;
 
+  GstPad *srcpad;
+
   /* Time positionning */
   GstClockTime start;
   GstClockTime inpoint;
