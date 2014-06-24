@@ -28,9 +28,11 @@
 #include "gnlobject.h"
 #include "gnlghostpad.h"
 #include "gnlsource.h"
-#include "gnlcomposition.h"
 #include "gnloperation.h"
 
 #include "gnlurisource.h"
+
+GType gnl_composition_get_type (void);
+
 
 #endif /* __GST_H__ */

@@ -16,7 +16,6 @@ libgnl_la_LIBTOOLFLAGS = $(GST_PLUGIN_LIBTOOLFLAGS)
 gnl_headers =			\
 	gnl.h			\
 	gnlobject.h		\
-	gnlcomposition.h	\
 	gnltypes.h		\
 	gnlghostpad.h		\
 	gnloperation.h		\

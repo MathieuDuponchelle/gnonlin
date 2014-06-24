@@ -97,7 +97,6 @@ translate_incoming_seek (GnlObject * object, GstEvent * event)
         GST_TIME_ARGS (nstop));
   }
 
-
   /* add accurate seekflags */
   if (G_UNLIKELY (!(flags & GST_SEEK_FLAG_ACCURATE))) {
     GST_DEBUG_OBJECT (object, "Adding GST_SEEK_FLAG_ACCURATE");
@@ -106,7 +105,6 @@ translate_incoming_seek (GnlObject * object, GstEvent * event)
     GST_DEBUG_OBJECT (object,
         "event already has GST_SEEK_FLAG_ACCURATE : %d", flags);
   }
-
 
 
   GST_DEBUG_OBJECT (object,
@@ -692,7 +690,7 @@ gnl_object_ghost_pad (GnlObject * object, const gchar * name, GstPad * target)
  */
 GstPad *
 gnl_object_ghost_pad_no_target (GnlObject * object, const gchar * name,
-    GstPadDirection dir, GstPadTemplate *template)
+    GstPadDirection dir, GstPadTemplate * template)
 {
   GstPad *ghost;
   GnlPadPrivate *priv;

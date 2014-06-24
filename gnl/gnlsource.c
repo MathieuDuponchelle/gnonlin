@@ -549,7 +549,7 @@ gnl_source_prepare (GnlObject * object)
     }
   }
 
-  if (!GNL_IS_COMPOSITION (parent)) {
+  if (!GST_OBJECT_FLAG_IS_SET (parent, GNL_OBJECT_COMPOSITION)) {
     /* Figure out if we're in a composition */
     if (source->priv->event)
       gst_event_unref (source->priv->event);
