@@ -55,7 +55,7 @@ GST_STATIC_PAD_TEMPLATE ("src",
 typedef struct _GnlCompositionEntry
 {
   GnlObject *object;
-  GnlComposition *self;
+  GnlComposition *comp;
 
   /* handler id for block probe */
   gulong probeid;
@@ -364,6 +364,40 @@ lock_child_state (GValue * item, GValue * ret G_GNUC_UNUSED,
 }
 
 static gint
+objects_start_compare (GnlObject * a, GnlObject * b)
+{
+  if (a->start == b->start) {
+    if (a->priority < b->priority)
+      return -1;
+    if (a->priority > b->priority)
+      return 1;
+    return 0;
+  }
+  if (a->start < b->start)
+    return -1;
+  if (a->start > b->start)
+    return 1;
+  return 0;
+}
+
+static gint
+objects_stop_compare (GnlObject * a, GnlObject * b)
+{
+  if (a->stop == b->stop) {
+    if (a->priority < b->priority)
+      return -1;
+    if (a->priority > b->priority)
+      return 1;
+    return 0;
+  }
+  if (b->stop < a->stop)
+    return -1;
+  if (b->stop > a->stop)
+    return 1;
+  return 0;
+}
+
+  static gint
 priority_comp (GnlObject * a, GnlObject * b)
 {
   if (a->priority < b->priority)
@@ -375,6 +409,111 @@ priority_comp (GnlObject * a, GnlObject * b)
   return 0;
 }
 
+/* signal_duration_change
+ * Creates a new GST_MESSAGE_DURATION_CHANGED with the currently configured
+ * composition duration and sends that on the bus.
+ */
+
+static inline void
+signal_duration_change (GnlComposition * comp)
+{
+  gst_element_post_message (GST_ELEMENT_CAST (comp),
+      gst_message_new_duration_changed (GST_OBJECT_CAST (comp)));
+}
+
+static void
+update_start_stop_duration (GnlComposition * comp)
+{
+  GnlObject *obj;
+  GnlObject *cobj = (GnlObject *) comp;
+
+  if (!comp->objects_start) {
+    GST_LOG ("no objects, resetting everything to 0");
+
+    if (cobj->start) {
+      cobj->start = cobj->pending_start = 0;
+      g_object_notify_by_pspec (G_OBJECT (cobj),
+          gnlobject_properties[GNLOBJECT_PROP_START]);
+    }
+
+    if (cobj->duration) {
+      cobj->pending_duration = cobj->duration = 0;
+      g_object_notify_by_pspec (G_OBJECT (cobj),
+          gnlobject_properties[GNLOBJECT_PROP_DURATION]);
+      signal_duration_change (comp);
+    }
+
+    if (cobj->stop) {
+      cobj->stop = 0;
+      g_object_notify_by_pspec (G_OBJECT (cobj),
+          gnlobject_properties[GNLOBJECT_PROP_STOP]);
+    }
+
+    return;
+  }
+
+  /* If we have a default object, the start position is 0 */
+  if (comp->expandables) {
+    GST_LOG_OBJECT (cobj,
+        "Setting start to 0 because we have a default object");
+
+    if (cobj->start != 0) {
+      cobj->pending_start = cobj->start = 0;
+      g_object_notify_by_pspec (G_OBJECT (cobj),
+          gnlobject_properties[GNLOBJECT_PROP_START]);
+    }
+
+  } else {
+
+    /* Else it's the first object's start value */
+    obj = (GnlObject *) comp->objects_start->data;
+
+    if (obj->start != cobj->start) {
+      GST_LOG_OBJECT (obj, "setting start from %s to %" GST_TIME_FORMAT,
+          GST_OBJECT_NAME (obj), GST_TIME_ARGS (obj->start));
+      cobj->pending_start = cobj->start = obj->start;
+      g_object_notify_by_pspec (G_OBJECT (cobj),
+          gnlobject_properties[GNLOBJECT_PROP_START]);
+    }
+
+  }
+
+  obj = (GnlObject *) comp->objects_stop->data;
+
+  if (obj->stop != cobj->stop) {
+    GST_LOG_OBJECT (obj, "setting stop from %s to %" GST_TIME_FORMAT,
+        GST_OBJECT_NAME (obj), GST_TIME_ARGS (obj->stop));
+
+    if (comp->expandables) {
+      GList *tmp;
+
+      GST_INFO_OBJECT (comp, "RE-setting all expandables duration and commit");
+      for (tmp = comp->expandables; tmp; tmp = tmp->next) {
+        g_object_set (tmp->data, "duration", obj->stop, NULL);
+        gnl_object_commit (GNL_OBJECT (tmp->data), FALSE);
+      }
+    }
+
+    comp->current_segment.stop = obj->stop;
+    cobj->stop = obj->stop;
+    g_object_notify_by_pspec (G_OBJECT (cobj),
+        gnlobject_properties[GNLOBJECT_PROP_STOP]);
+  }
+
+  if ((cobj->stop - cobj->start) != cobj->duration) {
+    cobj->pending_duration = cobj->duration = cobj->stop - cobj->start;
+    g_object_notify_by_pspec (G_OBJECT (cobj),
+        gnlobject_properties[GNLOBJECT_PROP_DURATION]);
+    signal_duration_change (comp);
+  }
+
+  GST_LOG_OBJECT (comp,
+      "start:%" GST_TIME_FORMAT
+      " stop:%" GST_TIME_FORMAT
+      " duration:%" GST_TIME_FORMAT,
+      GST_TIME_ARGS (cobj->start),
+      GST_TIME_ARGS (cobj->stop), GST_TIME_ARGS (cobj->duration));
+}
 /*
  * Converts a sorted list to a tree
  * Recursive
@@ -1441,29 +1580,6 @@ seek_handling (GnlComposition * self, gboolean update)
  * Child modification updates
  */
 
-static void
-object_pad_removed (GnlObject * object, GstPad * pad, GnlComposition * self)
-{
-  GST_DEBUG_OBJECT (self, "pad %s:%s was removed", GST_DEBUG_PAD_NAME (pad));
-
-  if (GST_PAD_IS_SRC (pad)) {
-    /* remove ghostpad if it's the current top stack object */
-    if (!(self->current_stack
-            && GNL_OBJECT (self->current_stack->data) == object)) {
-      GnlCompositionEntry *entry = COMP_ENTRY (self, object);
-
-      if (entry && entry->probeid) {
-        gst_pad_remove_probe (pad, entry->probeid);
-        entry->probeid = 0;
-      }
-      if (entry && entry->dataprobeid) {
-        gst_pad_remove_probe (pad, entry->dataprobeid);
-        entry->dataprobeid = 0;
-      }
-    }
-  }
-}
-
 static gboolean
 _update_pipeline_gsource (GnlComposition * self)
 {
@@ -1823,9 +1939,130 @@ _finalize (GObject * object)
   G_OBJECT_CLASS (parent_class)->finalize (object);
 }
 
+
+
+static gboolean
+gnl_composition_add_object (GstBin * bin, GstElement * element)
+{
+  gboolean ret;
+  GnlCompositionEntry *entry;
+  GnlComposition *comp = (GnlComposition *) bin;
+
+  /* we only accept GnlObject */
+  g_return_val_if_fail (GNL_IS_OBJECT (element), FALSE);
+
+  GST_DEBUG_OBJECT (bin, "element %s", GST_OBJECT_NAME (element));
+  GST_DEBUG_OBJECT (element, "%" GST_TIME_FORMAT "--%" GST_TIME_FORMAT,
+      GST_TIME_ARGS (GNL_OBJECT_START (element)),
+      GST_TIME_ARGS (GNL_OBJECT_STOP (element)));
+
+  gst_object_ref (element);
+
+  COMP_OBJECTS_LOCK (comp);
+
+  if ((GNL_OBJECT_IS_EXPANDABLE (element)) &&
+      g_list_find (comp->expandables, element)) {
+    GST_WARNING_OBJECT (comp,
+        "We already have an expandable, remove it before adding new one");
+    ret = FALSE;
+
+    goto chiringuito;
+  }
+
+  /* Call parent class ::add_element() */
+  ret = GST_BIN_CLASS (parent_class)->add_element (bin, element);
+
+  gnl_object_set_commit_needed (GNL_OBJECT (comp));
+
+  if (!ret) {
+    GST_WARNING_OBJECT (bin, "couldn't add element");
+    goto chiringuito;
+  }
+
+  /* lock state of child ! */
+  GST_LOG_OBJECT (bin, "Locking state of %s", GST_ELEMENT_NAME (element));
+  gst_element_set_locked_state (element, TRUE);
+
+  /* wrap new element in a GnlCompositionEntry ... */
+  entry = g_slice_new0 (GnlCompositionEntry);
+  entry->object = (GnlObject *) element;
+  entry->comp = comp;
+
+  if (GNL_OBJECT_IS_EXPANDABLE (element)) {
+    /* Only react on non-default objects properties */
+    g_object_set (element,
+        "start", (GstClockTime) 0,
+        "inpoint", (GstClockTime) 0,
+        "duration", (GstClockTimeDiff) GNL_OBJECT_STOP (comp), NULL);
+
+    GST_INFO_OBJECT (element, "Used as expandable, commiting now");
+    gnl_object_commit (GNL_OBJECT (element), FALSE);
+  }
+
+  /* ...and add it to the hash table */
+  g_hash_table_insert (comp->objects_hash, element, entry);
+
+  if (!entry->probeid) {
+    GST_DEBUG_OBJECT (comp, "pad %s:%s was added, blocking it",
+        GST_DEBUG_PAD_NAME (entry->object->srcpad));
+    entry->probeid =
+        gst_pad_add_probe (entry->object->srcpad,
+        GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM | GST_PAD_PROBE_TYPE_IDLE,
+        (GstPadProbeCallback) pad_blocked, comp, NULL);
+  }
+
+  if (!entry->dataprobeid) {
+    entry->dataprobeid = gst_pad_add_probe (entry->object->srcpad,
+        GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST |
+        GST_PAD_PROBE_TYPE_EVENT_BOTH, (GstPadProbeCallback) drop_data, entry,
+        NULL);
+  }
+
+  /* Set the caps of the composition */
+  if (G_UNLIKELY (!gst_caps_is_any (((GnlObject *) comp)->caps)))
+    gnl_object_set_caps ((GnlObject *) element, ((GnlObject *) comp)->caps);
+
+  /* Special case for default source. */
+  if (GNL_OBJECT_IS_EXPANDABLE (element)) {
+    /* It doesn't get added to objects_start and objects_stop. */
+    comp->expandables = g_list_prepend (comp->expandables, element);
+    goto beach;
+  }
+
+  /* add it sorted to the objects list */
+  comp->objects_start = g_list_insert_sorted
+      (comp->objects_start, element, (GCompareFunc) objects_start_compare);
+
+  if (comp->objects_start)
+    GST_LOG_OBJECT (comp,
+        "Head of objects_start is now %s [%" GST_TIME_FORMAT "--%"
+        GST_TIME_FORMAT "]",
+        GST_OBJECT_NAME (comp->objects_start->data),
+        GST_TIME_ARGS (GNL_OBJECT_START (comp->objects_start->data)),
+        GST_TIME_ARGS (GNL_OBJECT_STOP (comp->objects_start->data)));
+
+  comp->objects_stop = g_list_insert_sorted
+      (comp->objects_stop, element, (GCompareFunc) objects_stop_compare);
+
+  /* Now the object is ready to be commited and then used */
+
+beach:
+  COMP_OBJECTS_UNLOCK (comp);
+
+  gst_object_unref (element);
+  return ret;
+
+chiringuito:
+  {
+    update_start_stop_duration (comp);
+    goto beach;
+  }
+}
+
 static void
 gnl_composition_class_init (GnlCompositionClass * klass)
 {
+  GstBinClass *gstbin_class;
   GObjectClass *gobject_class = (GObjectClass *) klass;
   GstElementClass *gstelement_class = (GstElementClass *) klass;;
 
@@ -1836,6 +2073,9 @@ gnl_composition_class_init (GnlCompositionClass * klass)
   gobject_class->get_property = GST_DEBUG_FUNCPTR (_get_property);
   gobject_class->dispose = GST_DEBUG_FUNCPTR (_dispose);
   gobject_class->finalize = GST_DEBUG_FUNCPTR (_finalize);
+
+  gstbin_class = (GstBinClass *) klass;
+  gstbin_class->add_element = GST_DEBUG_FUNCPTR (gnl_composition_add_object);
 
   gstelement_class->change_state = _change_state;
   gst_element_class_set_static_metadata (gstelement_class,
