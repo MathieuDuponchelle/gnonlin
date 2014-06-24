@@ -1339,7 +1339,7 @@ gnl_composition_ghost_pad_set_target (GnlComposition * comp, GstPad * target,
   if (!hadghost) {
     /* Create new ghostpad */
     GstPad *ghostpad =
-        gnl_object_ghost_pad_no_target ((GnlObject *) comp, "src", GST_PAD_SRC);
+        gnl_object_ghost_pad_no_target ((GnlObject *) comp, "src", GST_PAD_SRC, NULL);
 
     if (!priv->gnl_event_pad_func) {
       GST_DEBUG_OBJECT (ghostpad, "About to replace event_pad_func");

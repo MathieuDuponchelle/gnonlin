@@ -661,7 +661,7 @@ gnl_object_ghost_pad (GnlObject * object, const gchar * name, GstPad * target)
   g_return_val_if_fail (target, FALSE);
   g_return_val_if_fail ((dir != GST_PAD_UNKNOWN), FALSE);
 
-  ghost = gnl_object_ghost_pad_no_target (object, name, dir);
+  ghost = gnl_object_ghost_pad_no_target (object, name, dir, NULL);
   if (!ghost) {
     GST_WARNING_OBJECT (object, "Couldn't create ghostpad");
     return NULL;
@@ -692,13 +692,16 @@ gnl_object_ghost_pad (GnlObject * object, const gchar * name, GstPad * target)
  */
 GstPad *
 gnl_object_ghost_pad_no_target (GnlObject * object, const gchar * name,
-    GstPadDirection dir)
+    GstPadDirection dir, GstPadTemplate *template)
 {
   GstPad *ghost;
   GnlPadPrivate *priv;
 
   /* create a no_target ghostpad */
-  ghost = gst_ghost_pad_new_no_target (name, dir);
+  if (template)
+    ghost = gst_ghost_pad_new_no_target_from_template (name, template);
+  else
+    ghost = gst_ghost_pad_new_no_target (name, dir);
   if (!ghost)
     return NULL;
 
@@ -725,6 +728,8 @@ gnl_object_ghost_pad_no_target (GnlObject * object, const gchar * name,
 
   return ghost;
 }
+
+
 
 void
 gnl_object_remove_ghost_pad (GnlObject * object, GstPad * ghost)
